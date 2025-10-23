@@ -86,6 +86,19 @@ type FinancialMutation struct {
 	UpdatedAt             time.Time              `json:"updated_at"`
 }
 
+// DocumentDetail represents a line item in a document
+type DocumentDetail struct {
+	ID              string `json:"id"`
+	LedgerAccountID string `json:"ledger_account_id"`
+	Price           string `json:"price"`
+}
+
+// Document represents a Moneybird document (receipt/invoice)
+type Document struct {
+	ID      string           `json:"id"`
+	Details []DocumentDetail `json:"details"`
+}
+
 // Client is the Moneybird API client
 type Client struct {
 	apiToken string
@@ -159,6 +172,55 @@ func (c *Client) GetFinancialMutations(startDate, endDate string) ([]FinancialMu
 	}
 
 	return mutations, nil
+}
+
+// GetDocumentsBatch fetches multiple documents at once using the synchronization endpoint
+func (c *Client) GetDocumentsBatch(documentIDs []string, docType string) ([]Document, error) {
+	if len(documentIDs) == 0 {
+		return nil, nil
+	}
+
+	endpoint := fmt.Sprintf("documents/%s/synchronization.json", docType)
+
+	requestBody := map[string]interface{}{
+		"ids": documentIDs,
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/%s/%s", baseURL, administrationID, endpoint)
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonData)))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.apiToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var docs []Document
+	if err := json.Unmarshal(body, &docs); err != nil {
+		return nil, fmt.Errorf("unmarshaling response: %w", err)
+	}
+
+	return docs, nil
 }
 
 // loadEnvFile loads environment variables from a file (for local development)
@@ -268,10 +330,56 @@ func main() {
 		}
 	}
 
+	// First pass: collect all unique document IDs
+	fmt.Println("   Collecting document IDs...")
+	uniqueDocIDs := make(map[string]bool)
+	for _, mut := range allMutations {
+		for _, payment := range mut.Payments {
+			if payment.InvoiceType == "Document" {
+				uniqueDocIDs[payment.InvoiceID] = true
+			}
+		}
+	}
+
+	// Fetch documents in batches
+	documentCache := make(map[string][]DocumentDetail)
+	if len(uniqueDocIDs) > 0 {
+		docIDs := make([]string, 0, len(uniqueDocIDs))
+		for id := range uniqueDocIDs {
+			docIDs = append(docIDs, id)
+		}
+
+		fmt.Printf("   Fetching %d unique documents...\n", len(docIDs))
+
+		// Try purchase_invoices first
+		purchaseDocs, err := client.GetDocumentsBatch(docIDs, "purchase_invoices")
+		if err == nil {
+			fmt.Printf("   Found %d purchase invoices\n", len(purchaseDocs))
+			for _, doc := range purchaseDocs {
+				if len(doc.Details) > 0 {
+					documentCache[doc.ID] = doc.Details
+				}
+			}
+		}
+
+		// Try receipts for any remaining
+		receiptDocs, err := client.GetDocumentsBatch(docIDs, "receipts")
+		if err == nil {
+			fmt.Printf("   Found %d receipts\n", len(receiptDocs))
+			for _, doc := range receiptDocs {
+				if len(doc.Details) > 0 {
+					documentCache[doc.ID] = doc.Details
+				}
+			}
+		}
+
+		fmt.Printf("   Successfully mapped %d/%d documents\n", len(documentCache), len(docIDs))
+	}
+
 	var paymentsProcessed, bookingsProcessed int
 
 	for _, mut := range allMutations {
-		// Process ledger account bookings (expenses)
+		// Process ledger account bookings (direct categorizations)
 		for _, booking := range mut.LedgerAccountBookings {
 			var amount float64
 			fmt.Sscanf(booking.Price, "%f", &amount)
@@ -279,21 +387,39 @@ func main() {
 			bookingsProcessed++
 		}
 
-		// Process payments (income from invoices)
+		// Process payments (linked to documents/invoices)
 		for _, payment := range mut.Payments {
 			var amount float64
 			fmt.Sscanf(payment.Price, "%f", &amount)
 
-			// For SalesInvoice payments, use the Omzet account instead of the bank account
-			targetAccountID := payment.LedgerAccountID
-			if payment.InvoiceType == "SalesInvoice" && omzetAccountID != "" {
-				targetAccountID = omzetAccountID
+			if payment.InvoiceType == "SalesInvoice" {
+				// Sales invoices are revenue
+				totals[omzetAccountID] += amount
+				paymentsProcessed++
+			} else if payment.InvoiceType == "Document" {
+				// Look up document details in our cache
+				if details, ok := documentCache[payment.InvoiceID]; ok {
+					// Add each detail to its respective ledger account
+					for _, detail := range details {
+						if detail.LedgerAccountID != "" {
+							var detailAmount float64
+							fmt.Sscanf(detail.Price, "%f", &detailAmount)
+							// Payment prices are not negative like booking prices
+							// (-= instead of +=)
+							totals[detail.LedgerAccountID] -= detailAmount
+						}
+					}
+					paymentsProcessed++
+				}
+				// Skip if document not found
+			} else if payment.LedgerAccountID != "" {
+				// Other payment types use their ledger account
+				totals[payment.LedgerAccountID] += amount
+				paymentsProcessed++
 			}
-
-			totals[targetAccountID] += amount
-			paymentsProcessed++
 		}
 	}
+
 	fmt.Printf("   Processed %d bookings and %d payments\n", bookingsProcessed, paymentsProcessed)
 	fmt.Printf("   Aggregated into %d categories\n", len(totals))
 
