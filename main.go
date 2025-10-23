@@ -9,6 +9,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/wcharczuk/go-chart/v2"
+	"github.com/wcharczuk/go-chart/v2/drawing"
 )
 
 const (
@@ -435,9 +438,44 @@ func main() {
 		}
 	}
 
-	// Print equity (family expenses)
+	// For equity accounts, group by root categories
+	fmt.Println("\nFamily Expenses (by root category):")
+	var totalFamilyExpenses float64
+	if _, ok := typeGroups["equity"]; ok {
+		// Build root category totals
+		rootTotals := make(map[string]float64)
+
+		for ledgerID, total := range totals {
+			if acc, ok := accountMap[ledgerID]; ok && acc.AccountType == "equity" {
+				totalFamilyExpenses += total
+
+				// Find the root account
+				rootAcc := acc
+
+				// Walk up the parent chain to find root
+				for rootAcc.ParentID != nil && *rootAcc.ParentID != "" {
+					if parent, exists := accountMap[*rootAcc.ParentID]; exists {
+						rootAcc = parent
+					} else {
+						break
+					}
+				}
+
+				// Add to root total
+				rootTotals[rootAcc.Name] += total
+			}
+		}
+
+		// Print sorted by amount
+		for name, amount := range rootTotals {
+			fmt.Printf("   %s: €%.2f\n", name, amount)
+		}
+		fmt.Printf("   TOTAL: €%.2f\n", totalFamilyExpenses)
+	}
+
+	// Print detailed equity for reference
 	if equityAccounts, ok := typeGroups["equity"]; ok {
-		fmt.Println("\nFamily Expenses (Equity accounts):")
+		fmt.Println("\nFamily Expenses (detailed):")
 		var totalEquity float64
 		for name, amount := range equityAccounts {
 			fmt.Printf("   %s: €%.2f\n", name, amount)
@@ -447,9 +485,9 @@ func main() {
 	}
 
 	// Print revenue
+	var totalRevenue float64
 	if revenueAccounts, ok := typeGroups["revenue"]; ok {
 		fmt.Println("\nRevenue:")
-		var totalRevenue float64
 		for name, amount := range revenueAccounts {
 			fmt.Printf("   %s: €%.2f\n", name, amount)
 			totalRevenue += amount
@@ -458,14 +496,127 @@ func main() {
 	}
 
 	// Print business expenses
+	var totalBusinessExpenses float64
 	if expenseAccounts, ok := typeGroups["expenses"]; ok {
 		fmt.Println("\nBusiness Expenses:")
-		var totalExpenses float64
 		for name, amount := range expenseAccounts {
 			fmt.Printf("   %s: €%.2f\n", name, amount)
-			totalExpenses += amount
+			totalBusinessExpenses += amount
 		}
-		fmt.Printf("   TOTAL: €%.2f\n", totalExpenses)
+		fmt.Printf("   TOTAL: €%.2f\n", totalBusinessExpenses)
+	}
+
+	// Calculate family budget
+	fmt.Println("\n=== Family Budget Calculation ===")
+
+	// Assuming 21% VAT rate (standard NL rate)
+	vatRate := 0.21
+	incomeTaxRate := 0.30
+
+	// TODO: REMOVE THIS - temporarily dividing income by 2 to test over-budget display
+	totalRevenue = totalRevenue / 2
+
+	revenueExclVAT := totalRevenue / (1 + vatRate)
+	vatAmount := totalRevenue - revenueExclVAT
+	incomeTax := revenueExclVAT * incomeTaxRate
+	familyBudget := revenueExclVAT - incomeTax + totalBusinessExpenses // business expenses are negative
+
+	fmt.Printf("Gross Revenue: €%.2f\n", totalRevenue)
+	fmt.Printf("VAT (21%%): €%.2f\n", -vatAmount)
+	fmt.Printf("Revenue excl. VAT: €%.2f\n", revenueExclVAT)
+	fmt.Printf("Income Tax (30%%): €%.2f\n", -incomeTax)
+	fmt.Printf("Business Expenses: €%.2f\n", totalBusinessExpenses)
+	fmt.Printf("\n💰 Available Family Budget: €%.2f\n", familyBudget)
+
+	remaining := familyBudget + totalFamilyExpenses // expenses are negative
+	percentageUsed := (totalFamilyExpenses / familyBudget) * 100
+
+	fmt.Printf("\n💸 Family Spending: €%.2f\n", totalFamilyExpenses)
+	fmt.Printf("📊 Budget Used: %.1f%%\n", -percentageUsed)
+	fmt.Printf("💵 Remaining: €%.2f\n", remaining)
+
+	// Generate pie chart
+	fmt.Println("\n4. Generating pie chart...")
+
+	// Prepare data for pie chart (root categories + remaining budget)
+	var pieValues []chart.Value
+	colors := []drawing.Color{
+		drawing.Color{R: 255, G: 99, B: 132, A: 255},  // Red
+		drawing.Color{R: 54, G: 162, B: 235, A: 255},  // Blue
+		drawing.Color{R: 255, G: 206, B: 86, A: 255},  // Yellow
+		drawing.Color{R: 75, G: 192, B: 192, A: 255},  // Teal
+		drawing.Color{R: 153, G: 102, B: 255, A: 255}, // Purple
+		drawing.Color{R: 255, G: 159, B: 64, A: 255},  // Orange
+		drawing.Color{R: 46, G: 204, B: 113, A: 255},  // Green
+	}
+
+	// Add root categories
+	if _, ok := typeGroups["equity"]; ok {
+		rootTotals := make(map[string]float64)
+		for ledgerID, total := range totals {
+			if acc, ok := accountMap[ledgerID]; ok && acc.AccountType == "equity" {
+				rootAcc := acc
+				for rootAcc.ParentID != nil && *rootAcc.ParentID != "" {
+					if parent, exists := accountMap[*rootAcc.ParentID]; exists {
+						rootAcc = parent
+					} else {
+						break
+					}
+				}
+				rootTotals[rootAcc.Name] += total
+			}
+		}
+
+		colorIndex := 0
+		for name, amount := range rootTotals {
+			pieValues = append(pieValues, chart.Value{
+				Label: name,
+				Value: -amount, // Make positive for chart
+				Style: chart.Style{
+					FillColor: colors[colorIndex%len(colors)],
+				},
+			})
+			colorIndex++
+		}
+	}
+
+	// Add remaining budget or over-budget indicator
+	if remaining > 0 {
+		pieValues = append(pieValues, chart.Value{
+			Label: "Remaining Budget",
+			Value: remaining,
+			Style: chart.Style{
+				FillColor: drawing.Color{R: 200, G: 200, B: 200, A: 255}, // Gray
+			},
+		})
+	} else if remaining < 0 {
+		pieValues = append(pieValues, chart.Value{
+			Label: "Over Budget",
+			Value: -remaining, // Make positive for display
+			Style: chart.Style{
+				FillColor: drawing.Color{R: 220, G: 53, B: 69, A: 255}, // Red
+			},
+		})
+	}
+
+	pie := chart.PieChart{
+		Width:  800,
+		Height: 600,
+		Values: pieValues,
+	}
+
+	chartFilename := fmt.Sprintf("budget_chart_%s.png", monthStart.Format("2006-01"))
+	chartFile, err := os.Create(chartFilename)
+	if err != nil {
+		fmt.Printf("   Error creating chart file: %v\n", err)
+	} else {
+		defer chartFile.Close()
+		err = pie.Render(chart.PNG, chartFile)
+		if err != nil {
+			fmt.Printf("   Error rendering chart: %v\n", err)
+		} else {
+			fmt.Printf("   ✓ Pie chart saved to %s\n", chartFilename)
+		}
 	}
 
 	// Save detailed data
