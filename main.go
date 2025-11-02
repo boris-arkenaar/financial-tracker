@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -251,6 +254,59 @@ func loadEnvFile(filename string) {
 	}
 }
 
+// sendToTelegram sends a message and image to Telegram
+func sendToTelegram(botToken, chatID, message, imagePath string) error {
+	// First send the image
+	file, err := os.Open(imagePath)
+	if err != nil {
+		return fmt.Errorf("opening image: %w", err)
+	}
+	defer file.Close()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// Add chat_id
+	_ = writer.WriteField("chat_id", chatID)
+
+	// Add caption with message
+	_ = writer.WriteField("caption", message)
+	_ = writer.WriteField("parse_mode", "HTML")
+
+	// Add photo
+	part, err := writer.CreateFormFile("photo", imagePath)
+	if err != nil {
+		return fmt.Errorf("creating form file: %w", err)
+	}
+	_, err = io.Copy(part, file)
+	if err != nil {
+		return fmt.Errorf("copying file: %w", err)
+	}
+
+	writer.Close()
+
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", botToken)
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("telegram API error (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	return nil
+}
+
 func main() {
 	// Command-line flags
 	manualRevenue := flag.Float64("revenue", 0, "Manual revenue override (e.g., -revenue=12850.20)")
@@ -267,10 +323,11 @@ func main() {
 
 	client := NewClient(apiToken)
 
-	// Get current month's date range
+	// Get previous month's date range
 	now := time.Now()
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	monthEnd := now // Use today as the end date
+	firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	monthStart := firstOfThisMonth.AddDate(0, -1, 0)
+	monthEnd := firstOfThisMonth.AddDate(0, 0, -1)
 
 	fmt.Printf("Fetching financial data for %s...\n\n", monthStart.Format("January 2006"))
 
@@ -545,21 +602,9 @@ func main() {
 	// Generate pie chart
 	fmt.Println("\n4. Generating pie chart...")
 
-	// Prepare data for pie chart (root categories + remaining budget)
-	var pieValues []chart.Value
-	colors := []drawing.Color{
-		drawing.Color{R: 255, G: 99, B: 132, A: 255},  // Red
-		drawing.Color{R: 54, G: 162, B: 235, A: 255},  // Blue
-		drawing.Color{R: 255, G: 206, B: 86, A: 255},  // Yellow
-		drawing.Color{R: 75, G: 192, B: 192, A: 255},  // Teal
-		drawing.Color{R: 153, G: 102, B: 255, A: 255}, // Purple
-		drawing.Color{R: 255, G: 159, B: 64, A: 255},  // Orange
-		drawing.Color{R: 46, G: 204, B: 113, A: 255},  // Green
-	}
-
-	// Add root categories
+	// Calculate root category totals
+	rootTotals := make(map[string]float64)
 	if _, ok := typeGroups["equity"]; ok {
-		rootTotals := make(map[string]float64)
 		for ledgerID, total := range totals {
 			if acc, ok := accountMap[ledgerID]; ok && acc.AccountType == "equity" {
 				rootAcc := acc
@@ -573,18 +618,42 @@ func main() {
 				rootTotals[rootAcc.Name] += total
 			}
 		}
+	}
 
-		colorIndex := 0
-		for name, amount := range rootTotals {
-			pieValues = append(pieValues, chart.Value{
-				Label: name,
-				Value: -amount, // Make positive for chart
-				Style: chart.Style{
-					FillColor: colors[colorIndex%len(colors)],
-				},
-			})
-			colorIndex++
-		}
+	// Sort categories by amount (largest to smallest)
+	type categoryAmount struct {
+		name   string
+		amount float64
+	}
+	var sortedCategories []categoryAmount
+	for name, amount := range rootTotals {
+		sortedCategories = append(sortedCategories, categoryAmount{name, amount})
+	}
+	sort.Slice(sortedCategories, func(i, j int) bool {
+		return sortedCategories[i].amount < sortedCategories[j].amount // ascending (most negative first)
+	})
+
+	// Prepare data for pie chart
+	var pieValues []chart.Value
+	colors := []drawing.Color{
+		drawing.Color{R: 255, G: 99, B: 132, A: 255},  // Red
+		drawing.Color{R: 54, G: 162, B: 235, A: 255},  // Blue
+		drawing.Color{R: 255, G: 206, B: 86, A: 255},  // Yellow
+		drawing.Color{R: 75, G: 192, B: 192, A: 255},  // Teal
+		drawing.Color{R: 153, G: 102, B: 255, A: 255}, // Purple
+		drawing.Color{R: 255, G: 159, B: 64, A: 255},  // Orange
+		drawing.Color{R: 46, G: 204, B: 113, A: 255},  // Green
+	}
+
+	// Add sorted categories to pie chart
+	for i, cat := range sortedCategories {
+		pieValues = append(pieValues, chart.Value{
+			Label: cat.name,
+			Value: -cat.amount, // Make positive for chart
+			Style: chart.Style{
+				FillColor: colors[i%len(colors)],
+			},
+		})
 	}
 
 	// Add remaining budget or over-budget indicator
@@ -624,6 +693,34 @@ func main() {
 		} else {
 			fmt.Printf("   ✓ Pie chart saved to %s\n", chartFilename)
 		}
+	}
+
+	// Send to Telegram
+	telegramToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	telegramChatID := os.Getenv("TELEGRAM_CHAT_ID")
+
+	if telegramToken != "" && telegramChatID != "" {
+		fmt.Println("\n5. Sending to Telegram...")
+
+		message := fmt.Sprintf("<b>💰 Budget Overview - %s</b>\n\n", monthStart.Format("January 2006"))
+		message += fmt.Sprintf("Available Budget: €%.2f\n", familyBudget)
+		message += fmt.Sprintf("Family Spending: €%.2f\n", totalFamilyExpenses)
+		message += fmt.Sprintf("Budget Used: %.1f%%\n", -percentageUsed)
+		message += fmt.Sprintf("Remaining: €%.2f\n\n", remaining)
+
+		message += "<b>Expenses by Category:</b>\n"
+		for _, cat := range sortedCategories {
+			message += fmt.Sprintf("• %s: €%.2f\n", cat.name, -cat.amount)
+		}
+
+		err = sendToTelegram(telegramToken, telegramChatID, message, chartFilename)
+		if err != nil {
+			fmt.Printf("   Error sending to Telegram: %v\n", err)
+		} else {
+			fmt.Println("   ✓ Sent to Telegram successfully!")
+		}
+	} else {
+		fmt.Println("\n⚠️  Telegram credentials not set (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
 	}
 
 	// Save detailed data
