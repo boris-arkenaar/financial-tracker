@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -251,6 +252,10 @@ func loadEnvFile(filename string) {
 }
 
 func main() {
+	// Command-line flags
+	manualRevenue := flag.Float64("revenue", 0, "Manual revenue override (e.g., -revenue=12850.20)")
+	flag.Parse()
+
 	loadEnvFile(".env")
 
 	apiToken := os.Getenv("MONEYBIRD_API_TOKEN")
@@ -262,11 +267,10 @@ func main() {
 
 	client := NewClient(apiToken)
 
-	// Get previous month's date range
+	// Get current month's date range
 	now := time.Now()
-	firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	monthStart := firstOfThisMonth.AddDate(0, -1, 0)
-	monthEnd := firstOfThisMonth.AddDate(0, 0, -1)
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	monthEnd := now // Use today as the end date
 
 	fmt.Printf("Fetching financial data for %s...\n\n", monthStart.Format("January 2006"))
 
@@ -509,12 +513,15 @@ func main() {
 	// Calculate family budget
 	fmt.Println("\n=== Family Budget Calculation ===")
 
-	// Assuming 21% VAT rate (standard NL rate)
+	// Use manual revenue if provided, otherwise use calculated
+	if *manualRevenue > 0 {
+		totalRevenue = *manualRevenue
+		fmt.Printf("Using manual revenue: €%.2f\n", totalRevenue)
+	}
+
+	// Calculate budget from revenue
 	vatRate := 0.21
 	incomeTaxRate := 0.30
-
-	// TODO: REMOVE THIS - temporarily dividing income by 2 to test over-budget display
-	totalRevenue = totalRevenue / 2
 
 	revenueExclVAT := totalRevenue / (1 + vatRate)
 	vatAmount := totalRevenue - revenueExclVAT
