@@ -1,0 +1,22 @@
+# fly.toml app configuration file generated for financial-tracker-young-wave-4459 on 2025-11-16T11:58:48+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'financial-tracker-young-wave-4459'
+primary_region = 'ams'
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
