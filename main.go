@@ -323,11 +323,16 @@ func main() {
 
 	client := NewClient(apiToken)
 
-	// Get previous month's date range
+	// Get current month's date range
 	now := time.Now()
-	firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	monthStart := firstOfThisMonth.AddDate(0, -1, 0)
-	monthEnd := firstOfThisMonth.AddDate(0, 0, -1)
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	monthEnd := now // Use today as the end date
+
+	// Get previous month's date range
+	// now := time.Now()
+	// firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	// monthStart := firstOfThisMonth.AddDate(0, -1, 0)
+	// monthEnd := firstOfThisMonth.AddDate(0, 0, -1)
 
 	fmt.Printf("Fetching financial data for %s...\n\n", monthStart.Format("January 2006"))
 
