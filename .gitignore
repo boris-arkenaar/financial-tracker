@@ -33,3 +33,4 @@ go.work.sum
 
 *.json
 *.png
+CLAUDE_PRIVATE.md
